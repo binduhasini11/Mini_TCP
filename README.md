@@ -220,7 +220,8 @@ Testing will progressively cover:
 ---
 
 **Contributors:** 
+
 B BINDU HASINI
+
 A JERUBA CARLLIN
-**Project:** Mini-TCP — A Reliable Transport Protocol from Scratch
-**Repository:** `binduhasini11/Mini_TCP`
+
