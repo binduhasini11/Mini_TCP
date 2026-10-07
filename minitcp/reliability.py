@@ -39,6 +39,7 @@ class ReliableSender:
             raise TypeError("payload must be bytes")
 
         sequence_number = self.next_sequence_number
+        expected_ack = sequence_number + len(payload)
 
         packet = Packet(
             packet_type=DATA,
@@ -69,8 +70,6 @@ class ReliableSender:
 
                     if response.packet_type != ACK:
                         continue
-
-                    expected_ack = sequence_number + len(payload)
 
                     if response.acknowledgement_number != expected_ack:
                         print(
