@@ -1,4 +1,5 @@
 import socket
+from typing import Optional
 
 
 class UDPTransport:
@@ -18,6 +19,13 @@ class UDPTransport:
 
     def receive(self, buffer_size: int = 65535):
         return self.socket.recvfrom(buffer_size)
+
+    def set_timeout(self, timeout: Optional[float]):
+        """Set the socket receive timeout in seconds.
+
+        Pass None to restore blocking behaviour.
+        """
+        self.socket.settimeout(timeout)
 
     def close(self):
         self.socket.close()
