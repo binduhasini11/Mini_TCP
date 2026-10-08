@@ -49,8 +49,11 @@ class ReliableSender:
 
         for attempt in range(self.max_retries + 1):
             print(
-                f"SENDER: Sending DATA seq={sequence_number} "
-                f"(attempt {attempt + 1})"
+                f"\nSENDER: Sending DATA\n "
+                f"SEQ={sequence_number} | "
+                f"Payload={payload!r} | "
+                f"Length={len(payload)} bytes | "
+                f"Attempt={attempt + 1}"
             )
 
             self.connection.send_packet(
@@ -73,14 +76,15 @@ class ReliableSender:
 
                     if response.acknowledgement_number != expected_ack:
                         print(
-                            f"SENDER: Ignoring ACK "
-                            f"{response.acknowledgement_number}; "
-                            f"expected {expected_ack}"
+                            f"SENDER: Ignoring ACK={response.acknowledgement_number} | "
+                            f"Expected ACK={expected_ack}"
                         )
                         continue
 
                     print(
-                        f"SENDER: Received ACK={expected_ack}"
+                        f"SENDER: Received ACK={expected_ack} | "
+                        f"DATA SEQ={sequence_number} acknowledged | "
+                        f"Next SEQ={expected_ack}"
                     )
 
                     self.next_sequence_number = expected_ack
@@ -91,13 +95,15 @@ class ReliableSender:
             except socket.timeout:
                 if attempt >= self.max_retries:
                     raise TimeoutError(
-                        f"DATA seq={sequence_number} failed after "
-                        f"{self.max_retries + 1} attempts"
+                        f"DATA SEQ={sequence_number} | "
+                        f"Payload={payload!r} | "
+                        f"Failed after {self.max_retries + 1} attempts"
                     )
 
                 print(
-                    f"SENDER: Timeout waiting for ACK={expected_ack}; "
-                    "retransmitting"
+                    f"\nSENDER: TIMEOUT\n"
+                    f"Expected ACK={expected_ack} | "
+                    f"Retransmitting SAME DATA SEQ={sequence_number}"
                 )
 
         raise TimeoutError("Reliable transmission failed")
@@ -136,7 +142,10 @@ class ReliableReceiver:
 
             if sequence_number == self.expected_sequence_number:
                 print(
-                    f"RECEIVER: Received DATA seq={sequence_number}"
+                    f"\nRECEIVER: Received DATA\n"
+                    f"SEQ={sequence_number} | "
+                    f"Payload={payload!r} | "
+                    f"Length={len(payload)} bytes"
                 )
 
                 next_expected = sequence_number + len(payload)
@@ -153,7 +162,8 @@ class ReliableReceiver:
                 )
 
                 print(
-                    f"RECEIVER: Sending ACK={next_expected}"
+                    f"RECEIVER: Sending ACK={next_expected} | "
+                    f"Next DATA expected={next_expected}"
                 )
 
                 self.expected_sequence_number = next_expected
@@ -163,8 +173,10 @@ class ReliableReceiver:
 
             if sequence_number < self.expected_sequence_number:
                 print(
-                    f"RECEIVER: Duplicate DATA seq={sequence_number}; "
-                    "resending ACK"
+                    f"\nRECEIVER: Duplicate DATA\n"
+                    f"SEQ={sequence_number} | "
+                    f"Expected SEQ={self.expected_sequence_number} | "
+                    f"Resending ACK={self.expected_sequence_number}"
                 )
 
                 ack = Packet(
@@ -181,8 +193,10 @@ class ReliableReceiver:
                 continue
 
             print(
-                f"RECEIVER: Out-of-order DATA seq={sequence_number}; "
-                f"expected {self.expected_sequence_number}"
+                f"\nRECEIVER: Out-of-order DATA\n"
+                f"SEQ={sequence_number} | "
+                f"Expected SEQ={self.expected_sequence_number} | "
+                f"Sending cumulative ACK={self.expected_sequence_number}"
             )
 
             ack = Packet(
