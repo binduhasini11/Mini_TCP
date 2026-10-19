@@ -3,18 +3,51 @@ from minitcp.connection import MiniTCPConnection
 from minitcp.reliability import ReliableSender
 
 
-transport = UDPTransport("127.0.0.1", 9000)
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 9001
+CLIENT_HOST = "127.0.0.1"
+CLIENT_PORT = 9000
 
-connection = MiniTCPConnection(transport)
 
-connection.connect(("127.0.0.1", 9001))
+def main():
+    transport = UDPTransport(CLIENT_HOST, CLIENT_PORT)
+    connection = MiniTCPConnection(transport)
 
-print("CLIENT: Connection established!")
+    try:
+        connection.connect((SERVER_HOST, SERVER_PORT))
+        print("\nCLIENT: Connection established!")
 
-sender = ReliableSender(connection)
+        sender = ReliableSender(connection)
 
-sender.send(b"Hello from Mini-TCP!")
+        print("\nType a message and press Enter.")
+        print("Type /quit to exit.\n")
 
-print("CLIENT: Data sent successfully!")
+        while True:
+            message = input("You: ")
 
-transport.close()
+            if message.strip() == "/quit":
+                print("CLIENT: Closing application.")
+                break
+
+            if not message:
+                print("Please enter a non-empty message.")
+                continue
+
+            payload = message.encode("utf-8")
+
+            try:
+                sender.send(payload)
+                print("CLIENT: Message sent successfully.")
+
+            except TimeoutError as error:
+                print(f"CLIENT: Transmission failed: {error}")
+
+    except (OSError, RuntimeError) as error:
+        print(f"CLIENT ERROR: {error}")
+
+    finally:
+        transport.close()
+
+
+if __name__ == "__main__":
+    main()

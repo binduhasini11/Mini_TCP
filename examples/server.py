@@ -3,19 +3,43 @@ from minitcp.connection import MiniTCPConnection
 from minitcp.reliability import ReliableReceiver
 
 
-transport = UDPTransport("127.0.0.1", 9001)
-transport.bind()
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 9001
 
-connection = MiniTCPConnection(transport)
 
-connection.accept()
+def main():
+    transport = UDPTransport(SERVER_HOST, SERVER_PORT)
+    transport.bind()
 
-print("SERVER: Connection established!")
+    connection = MiniTCPConnection(transport)
 
-receiver = ReliableReceiver(connection)
+    try:
+        print("MINI-TCP SERVER")
+        print("----------------")
+        print(f"Listening on {SERVER_HOST}:{SERVER_PORT}")
 
-data = receiver.receive()
+        connection.accept()
 
-print("SERVER: Received:", data.decode())
+        print("\nSERVER: Connection established!")
 
-transport.close()
+        receiver = ReliableReceiver(connection)
+
+        while True:
+            data = receiver.receive()
+
+            try:
+                message = data.decode("utf-8")
+            except UnicodeDecodeError:
+                message = repr(data)
+
+            print(f"\nReceived message: {message}")
+
+    except (OSError, RuntimeError) as error:
+        print(f"SERVER ERROR: {error}")
+
+    finally:
+        transport.close()
+
+
+if __name__ == "__main__":
+    main()
