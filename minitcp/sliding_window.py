@@ -1,18 +1,17 @@
 import socket
-import threading
 import time
 
 from minitcp.connection import MiniTCPConnection
 from minitcp.packet import ACK, DATA, Packet
+from minitcp.rtt import RTTEstimator
 
 
 class SlidingWindowSender:
     """
     Sliding-window reliable sender using byte-based sequence numbers.
 
-    Multiple DATA packets may be outstanding at the same time.
-    ACKs are cumulative: an ACK acknowledges all bytes before its
-    acknowledgement number.
+    Supports cumulative ACKs, adaptive retransmission timeouts,
+    Karn's algorithm, and exponential timeout backoff.
     """
 
     def __init__(
@@ -47,19 +46,13 @@ class SlidingWindowSender:
         self.max_retries = max_retries
         self.segment_size = segment_size
 
-        # The first data byte follows the client's handshake sequence.
+        self.rtt_estimator = RTTEstimator(initial_rto=timeout)
+
         self.base = connection.sequence_number + 1
         self.next_sequence_number = self.base
 
-        self._lock = threading.Lock()
-
     def send(self, payload: bytes) -> None:
-        """
-        Send a complete byte string reliably using a sliding window.
-
-        This method returns only after all payload bytes have been
-        cumulatively acknowledged.
-        """
+        """Send all bytes reliably using a sliding window."""
         if not isinstance(payload, bytes):
             raise TypeError("payload must be bytes")
 
@@ -67,47 +60,42 @@ class SlidingWindowSender:
             return
 
         packets = []
-
-        # Split the payload into segments.
         sequence = self.next_sequence_number
 
         for offset in range(0, len(payload), self.segment_size):
             chunk = payload[offset:offset + self.segment_size]
 
-            packet = Packet(
-                packet_type=DATA,
-                sequence_number=sequence,
-                payload=chunk,
+            packets.append(
+                Packet(
+                    packet_type=DATA,
+                    sequence_number=sequence,
+                    payload=chunk,
+                )
             )
-
-            packets.append(packet)
             sequence += len(chunk)
 
         first_sequence = packets[0].sequence_number
         final_sequence = sequence
 
-        # Each outstanding segment stores its most recent send time
-        # and number of retransmissions.
+        # Per segment:
+        # packet, sent_at, retries, retransmitted
         outstanding = {}
-
         next_packet_index = 0
         acknowledged_until = first_sequence
 
-        old_timeout = getattr(
-            self.connection.transport.socket,
-            "gettimeout",
-            lambda: None,
-        )()
+        transport_socket = self.connection.transport.socket
+        old_timeout = transport_socket.gettimeout()
 
         try:
             while acknowledged_until < final_sequence:
 
-                # Fill the sending window.
+                # Fill the window with new segments.
                 while (
                     next_packet_index < len(packets)
                     and len(outstanding) < self.window_size
                 ):
                     packet = packets[next_packet_index]
+                    now = time.monotonic()
 
                     print(
                         f"SENDER: Sending DATA "
@@ -122,14 +110,14 @@ class SlidingWindowSender:
 
                     outstanding[packet.sequence_number] = {
                         "packet": packet,
-                        "sent_at": time.monotonic(),
+                        "sent_at": now,
                         "retries": 0,
+                        "retransmitted": False,
                     }
 
                     next_packet_index += 1
 
-                # Wait briefly for an ACK so the sender can also
-                # notice retransmission deadlines.
+                # Wait briefly, allowing us to notice ACKs and deadlines.
                 self.connection.transport.set_timeout(0.05)
 
                 try:
@@ -140,7 +128,7 @@ class SlidingWindowSender:
 
                 now = time.monotonic()
 
-                # Process cumulative ACKs.
+                # Process valid cumulative ACKs.
                 if (
                     response is not None
                     and address == self.connection.peer_address
@@ -149,15 +137,50 @@ class SlidingWindowSender:
                     ack_number = response.acknowledgement_number
 
                     if acknowledged_until < ack_number <= final_sequence:
+
+                        # Karn's algorithm:
+                        # Take an RTT sample only if exactly one newly
+                        # acknowledged segment was never retransmitted.
+                        newly_acked = []
+
+                        for seq, item in outstanding.items():
+                            packet_end = (
+                                item["packet"].sequence_number
+                                + len(item["packet"].payload)
+                            )
+
+                            if (
+                                acknowledged_until < packet_end <= ack_number
+                            ):
+                                newly_acked.append((seq, item))
+
+                        eligible_samples = [
+                            item
+                            for _, item in newly_acked
+                            if not item["retransmitted"]
+                        ]
+
+                        if len(newly_acked) == 1 and len(eligible_samples) == 1:
+                            sample_item = eligible_samples[0]
+                            measured_rtt = now - sample_item["sent_at"]
+
+                            if measured_rtt > 0:
+                                self.rtt_estimator.update(measured_rtt)
+                                print(
+                                    "SENDER: RTT sample="
+                                    f"{measured_rtt:.4f}s | "
+                                    f"New RTO={self.rtt_estimator.rto:.4f}s"
+                                )
+
                         acknowledged_until = ack_number
                         self.base = ack_number
 
-                        # Remove every segment fully covered by ACK.
+                        # Remove every fully acknowledged segment.
                         for seq in list(outstanding):
-                            packet = outstanding[seq]
+                            item = outstanding[seq]
                             packet_end = (
-                                packet["packet"].sequence_number
-                                + len(packet["packet"].payload)
+                                item["packet"].sequence_number
+                                + len(item["packet"].payload)
                             )
 
                             if packet_end <= ack_number:
@@ -167,37 +190,49 @@ class SlidingWindowSender:
                             f"SENDER: Received cumulative ACK={ack_number}"
                         )
 
-                # Retransmit segments whose timeout has expired.
+                # Check each outstanding segment's adaptive deadline.
+                now = time.monotonic()
+
+                now = time.monotonic()
+                expired_packets = []
+
                 for seq in sorted(outstanding):
                     item = outstanding[seq]
 
-                    if now - item["sent_at"] < self.timeout:
-                        continue
+                    if now - item["sent_at"] >= self.rtt_estimator.rto:
+                        expired_packets.append((seq, item))
 
-                    if item["retries"] >= self.max_retries:
-                        raise TimeoutError(
-                            f"DATA SEQ={seq} failed after "
-                            f"{self.max_retries} retransmissions"
-                        )
+                if expired_packets:
+                    # Apply exponential backoff once per timeout event.
+                    self.rtt_estimator.backoff()
 
                     print(
-                        f"SENDER: TIMEOUT for SEQ={seq}; "
-                        f"retransmitting"
+                        "SENDER: Exponential backoff; "
+                        f"new RTO={self.rtt_estimator.rto:.4f}s"
                     )
 
-                    self.connection.send_packet(
-                        item["packet"],
-                        self.connection.peer_address,
-                    )
+                    for seq, item in expired_packets:
+                        if item["retries"] >= self.max_retries:
+                            raise TimeoutError(
+                                f"DATA SEQ={seq} failed after "
+                                f"{self.max_retries} retransmissions"
+                            )
 
-                    item["sent_at"] = time.monotonic()
-                    item["retries"] += 1
+                        print(
+                            f"SENDER: TIMEOUT for SEQ={seq}; retransmitting"
+                        )
 
+                        self.connection.send_packet(
+                            item["packet"],
+                            self.connection.peer_address,
+                        )
+
+                        item["sent_at"] = time.monotonic()
+                        item["retries"] += 1
+                        item["retransmitted"] = True
         finally:
             self.connection.transport.set_timeout(old_timeout)
 
-        # Advance the connection's sequence number only after the
-        # entire payload has been acknowledged.
         self.next_sequence_number = final_sequence
         self.connection.sequence_number = final_sequence
 
@@ -211,8 +246,7 @@ class SlidingWindowReceiver:
     """
     Sliding-window receiver with cumulative ACKs.
 
-    This implementation buffers out-of-order segments and delivers
-    data only when the missing earlier bytes have arrived.
+    Buffers out-of-order segments and delivers contiguous data in order.
     """
 
     def __init__(
@@ -238,20 +272,13 @@ class SlidingWindowReceiver:
         self.segment_size = segment_size
         self.receive_window_bytes = window_size * segment_size
 
-        # The receiver expects the byte immediately after the
-        # client's handshake sequence number.
         self.expected_sequence_number = connection.acknowledgement_number
 
         self.buffer = {}
         self._ready = bytearray()
 
     def receive(self) -> bytes:
-        """
-        Return the next contiguous DATA segment.
-
-        Out-of-order data is buffered. Duplicate or out-of-window
-        packets are not delivered twice.
-        """
+        """Return contiguous DATA while buffering out-of-order segments."""
         while not self._ready:
             packet, address = self.connection.receive_packet()
 
@@ -270,7 +297,7 @@ class SlidingWindowReceiver:
 
             packet_end = seq + len(payload)
 
-            # Already received data: acknowledge the current point.
+            # A fully received segment is a duplicate.
             if packet_end <= self.expected_sequence_number:
                 print(
                     f"RECEIVER: Duplicate DATA SEQ={seq}; "
@@ -279,12 +306,12 @@ class SlidingWindowReceiver:
                 self._send_ack()
                 continue
 
-            # Keep only packets inside the receive window.
             max_sequence = (
-                self.expected_sequence_number
-                + self.receive_window_bytes
+                self.expected_sequence_number + self.receive_window_bytes
             )
 
+            # Reject data that begins before the receive point or extends
+            # beyond the currently permitted receive window.
             if (
                 seq < self.expected_sequence_number
                 or packet_end > max_sequence
@@ -296,10 +323,25 @@ class SlidingWindowReceiver:
                 self._send_ack()
                 continue
 
+            # Reject overlapping buffered segments to avoid duplicate bytes.
+            overlaps = any(
+                seq < buffered_seq + len(buffered_payload)
+                and buffered_seq < packet_end
+                for buffered_seq, buffered_payload in self.buffer.items()
+            )
+
+            if overlaps:
+                print(
+                    f"RECEIVER: Overlapping DATA SEQ={seq}; "
+                    "discarding and sending cumulative ACK"
+                )
+                self._send_ack()
+                continue
+
             if seq not in self.buffer:
                 self.buffer[seq] = payload
 
-            # Deliver any now-contiguous data segments.
+            # Deliver any contiguous segments now available.
             while self.expected_sequence_number in self.buffer:
                 chunk = self.buffer.pop(self.expected_sequence_number)
                 self._ready.extend(chunk)
