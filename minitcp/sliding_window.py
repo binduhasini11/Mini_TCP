@@ -219,6 +219,7 @@ class SlidingWindowReceiver:
         self,
         connection: MiniTCPConnection,
         window_size: int = 4,
+        segment_size: int = 512,
     ):
         if connection.peer_address is None:
             raise RuntimeError("Connection has no peer address")
@@ -229,8 +230,13 @@ class SlidingWindowReceiver:
         if window_size < 1:
             raise ValueError("window_size must be at least 1")
 
+        if segment_size < 1:
+            raise ValueError("segment_size must be at least 1")
+
         self.connection = connection
         self.window_size = window_size
+        self.segment_size = segment_size
+        self.receive_window_bytes = window_size * segment_size
 
         # The receiver expects the byte immediately after the
         # client's handshake sequence number.
@@ -276,10 +282,13 @@ class SlidingWindowReceiver:
             # Keep only packets inside the receive window.
             max_sequence = (
                 self.expected_sequence_number
-                + self.window_size * 65535
+                + self.receive_window_bytes
             )
 
-            if seq < self.expected_sequence_number or seq >= max_sequence:
+            if (
+                seq < self.expected_sequence_number
+                or packet_end > max_sequence
+            ):
                 print(
                     f"RECEIVER: DATA SEQ={seq} outside receive window; "
                     f"sending ACK={self.expected_sequence_number}"

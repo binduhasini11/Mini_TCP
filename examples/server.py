@@ -33,6 +33,7 @@ def main():
         receiver = SlidingWindowReceiver(
             connection,
             window_size=4,
+            segment_size=8,
         )
 
         # Retain bytes that belong to the next read.
