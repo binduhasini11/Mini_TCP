@@ -26,4 +26,4 @@ assert received_packet.sequence_number == 100
 assert received_packet.acknowledgement_number == 50
 assert received_packet.payload == b"Hello Mini-TCP"
 
-print("\n✅ Packet serialization test passed!")
+print("\n[OK] Packet serialization test passed!")

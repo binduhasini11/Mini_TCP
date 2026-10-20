@@ -4,6 +4,7 @@ import time
 from minitcp.connection import MiniTCPConnection
 from minitcp.packet import ACK, DATA, Packet
 from minitcp.rtt import RTTEstimator
+from minitcp.congestion import CongestionController
 
 
 class SlidingWindowSender:
@@ -47,6 +48,7 @@ class SlidingWindowSender:
         self.segment_size = segment_size
 
         self.rtt_estimator = RTTEstimator(initial_rto=timeout)
+        self.congestion_controller = CongestionController()
 
         self.base = connection.sequence_number + 1
         self.next_sequence_number = self.base
@@ -90,9 +92,16 @@ class SlidingWindowSender:
             while acknowledged_until < final_sequence:
 
                 # Fill the window with new segments.
+                # Fill the window, respecting both configured capacity
+                # and the congestion-control window.
+                effective_window = min(
+                    self.window_size,
+                    max(1, int(self.congestion_controller.cwnd)),
+                )
+
                 while (
                     next_packet_index < len(packets)
-                    and len(outstanding) < self.window_size
+                    and len(outstanding) < effective_window
                 ):
                     packet = packets[next_packet_index]
                     now = time.monotonic()
@@ -136,7 +145,16 @@ class SlidingWindowSender:
                 ):
                     ack_number = response.acknowledgement_number
 
-                    if acknowledged_until < ack_number <= final_sequence:
+                    highest_sent_end = max(
+                        (
+                            item["packet"].sequence_number
+                            + len(item["packet"].payload)
+                            for item in outstanding.values()
+                        ),
+                        default=acknowledged_until,
+                    )
+
+                    if acknowledged_until < ack_number <= highest_sent_end:
 
                         # Karn's algorithm:
                         # Take an RTT sample only if exactly one newly
@@ -172,6 +190,11 @@ class SlidingWindowSender:
                                     f"New RTO={self.rtt_estimator.rto:.4f}s"
                                 )
 
+                        if newly_acked:
+                            self.congestion_controller.on_new_ack(
+                                len(newly_acked)
+                            )
+
                         acknowledged_until = ack_number
                         self.base = ack_number
 
@@ -190,9 +213,23 @@ class SlidingWindowSender:
                             f"SENDER: Received cumulative ACK={ack_number}"
                         )
 
-                # Check each outstanding segment's adaptive deadline.
-                now = time.monotonic()
+                    elif ack_number == acknowledged_until:
+                        if self.congestion_controller.on_duplicate_ack():
+                            if outstanding:
+                                earliest_seq = min(outstanding)
+                                item = outstanding[earliest_seq]
+                                print(
+                                    f"SENDER: Fast Retransmit for SEQ={earliest_seq}"
+                                )
+                                self.connection.send_packet(
+                                    item["packet"],
+                                    self.connection.peer_address,
+                                )
+                                item["sent_at"] = time.monotonic()
+                                item["retries"] += 1
+                                item["retransmitted"] = True
 
+                # Check each outstanding segment's adaptive deadline.
                 now = time.monotonic()
                 expired_packets = []
 
@@ -203,6 +240,8 @@ class SlidingWindowSender:
                         expired_packets.append((seq, item))
 
                 if expired_packets:
+                    self.congestion_controller.on_timeout()
+
                     # Apply exponential backoff once per timeout event.
                     self.rtt_estimator.backoff()
 
