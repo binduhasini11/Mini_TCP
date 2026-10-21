@@ -1,0 +1,6 @@
+date_utc=20261021T061054Z
+uname=Linux DESKTOP-KC14K7S 6.18.54.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Tue Oct  6 19:13:07 UTC 2026 x86_64 GNU/Linux
+tc_version=tc utility, iproute2-6.19.0, libbpf 1.6.3
+loss_percent=1
+delay_ms=20
+reorder_percent=0

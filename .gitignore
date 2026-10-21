@@ -1,2 +1,23 @@
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Generated benchmark outputs in the repository root
+/benchmark_results*.csv
+/benchmark_summary*.csv
+/benchmark_throughput*.svg
+/benchmark_run.log
+/congestion_events*.csv
+/congestion_window*.svg
+/tcp_comparison_results*.csv
+/tcp_comparison_summary*.csv
+/tcp_comparison_throughput*.svg
+
+# Generated transfer artifacts
+/received_files/
+/sample.bin
+
+# Preserve the latest successful controlled network experiment.
+# Other netem experiment directories remain available locally.
+/netem_results/*
+!/netem_results/netem_20261021T061054Z_8017/
+!/netem_results/netem_20261021T061054Z_8017/**

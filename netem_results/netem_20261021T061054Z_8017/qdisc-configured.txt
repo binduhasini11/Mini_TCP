@@ -1,0 +1,1 @@
+qdisc netem 7e57: root refcnt 2 limit 1000 delay 20ms loss 1% seed 4612800163624061686

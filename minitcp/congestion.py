@@ -1,4 +1,5 @@
 from enum import Enum
+import time
 
 
 class CongestionState(str, Enum):
@@ -22,6 +23,7 @@ class CongestionController:
         initial_ssthresh: float = 8.0,
         duplicate_ack_threshold: int = 3,
         min_ssthresh: float = 2.0,
+        event_callback=None,
     ):
         if initial_cwnd < 1:
             raise ValueError("initial_cwnd must be at least 1")
@@ -43,11 +45,26 @@ class CongestionController:
 
         self.duplicate_ack_threshold = duplicate_ack_threshold
         self.duplicate_ack_count = 0
+        self.event_callback = event_callback
+        self._started_at = time.monotonic()
 
         if self.cwnd < self.ssthresh:
             self.state = CongestionState.SLOW_START
         else:
             self.state = CongestionState.CONGESTION_AVOIDANCE
+        self._record_event("initial")
+
+    def _record_event(self, event):
+        """Emit an optional structured observation without changing control logic."""
+        if self.event_callback is not None:
+            self.event_callback({
+                "elapsed_seconds": time.monotonic() - self._started_at,
+                "event": event,
+                "state": self.state.value,
+                "cwnd_segments": self.cwnd,
+                "ssthresh_segments": self.ssthresh,
+                "duplicate_ack_count": self.duplicate_ack_count,
+            })
 
     def on_new_ack(self, newly_acked_segments: int = 1) -> None:
         """
@@ -65,6 +82,7 @@ class CongestionController:
         if self.state == CongestionState.FAST_RECOVERY:
             self.cwnd = self.ssthresh
             self.state = CongestionState.CONGESTION_AVOIDANCE
+            self._record_event("new_ack_exit_fast_recovery")
 
             print(
                 "CONGESTION: Exiting fast recovery | "
@@ -84,6 +102,7 @@ class CongestionController:
                     self.state = (
                         CongestionState.CONGESTION_AVOIDANCE
                     )
+                self._record_event("new_ack")
 
             else:
                 # Additive increase:
@@ -109,6 +128,7 @@ class CongestionController:
             # Further duplicate ACKs indicate that
             # additional data has left the network.
             self.cwnd += 1.0
+            self._record_event("duplicate_ack_fast_recovery")
 
             print(
                 "CONGESTION: Additional duplicate ACK | "
@@ -123,6 +143,7 @@ class CongestionController:
             f"{self.duplicate_ack_count}/"
             f"{self.duplicate_ack_threshold}"
         )
+        self._record_event("duplicate_ack")
 
         if (
             self.duplicate_ack_count
@@ -141,6 +162,7 @@ class CongestionController:
         )
 
         self.state = CongestionState.FAST_RECOVERY
+        self._record_event("fast_retransmit")
 
         print(
             "CONGESTION: Fast Retransmit triggered | "
@@ -163,6 +185,7 @@ class CongestionController:
         self.cwnd = 1.0
         self.state = CongestionState.SLOW_START
         self.duplicate_ack_count = 0
+        self._record_event("timeout")
 
         print(
             "CONGESTION: Timeout | "

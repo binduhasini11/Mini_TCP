@@ -22,6 +22,8 @@ class SlidingWindowSender:
         timeout: float = 1.0,
         max_retries: int = 5,
         segment_size: int = 512,
+        incoming_data_handler=None,
+        congestion_event_handler=None,
     ):
         if connection.peer_address is None:
             raise RuntimeError("Connection has no peer address")
@@ -46,9 +48,13 @@ class SlidingWindowSender:
         self.timeout = timeout
         self.max_retries = max_retries
         self.segment_size = segment_size
+        self.incoming_data_handler = incoming_data_handler
+        self.congestion_event_handler = congestion_event_handler
 
         self.rtt_estimator = RTTEstimator(initial_rto=timeout)
-        self.congestion_controller = CongestionController()
+        self.congestion_controller = CongestionController(
+            event_callback=congestion_event_handler
+        )
 
         self.base = connection.sequence_number + 1
         self.next_sequence_number = self.base
@@ -84,6 +90,7 @@ class SlidingWindowSender:
         outstanding = {}
         next_packet_index = 0
         acknowledged_until = first_sequence
+        handshake_recovery_sent = False
 
         transport_socket = self.connection.transport.socket
         old_timeout = transport_socket.gettimeout()
@@ -228,6 +235,42 @@ class SlidingWindowSender:
                                 item["sent_at"] = time.monotonic()
                                 item["retries"] += 1
                                 item["retransmitted"] = True
+                elif (
+                    response is not None
+                    and address == self.connection.peer_address
+                ):
+                    respond = getattr(
+                        self.connection,
+                        "respond_to_retransmitted_syn_ack",
+                        None,
+                    )
+                    handled_handshake = bool(
+                        respond and respond(response, address)
+                    )
+                    # DATA sent before the peer accepted the final handshake
+                    # ACK may have been discarded by its accept loop. A
+                    # matching retransmitted SYN-ACK proves handshake
+                    # recovery is in progress; resend outstanding DATA once
+                    # after re-ACKing it. Keep this separate from timeout
+                    # retries, and bounded to one recovery burst per send().
+                    if (handled_handshake and outstanding
+                            and not handshake_recovery_sent):
+                        handshake_recovery_sent = True
+                        recovery_time = time.monotonic()
+                        for seq in sorted(outstanding):
+                            item = outstanding[seq]
+                            self.connection.send_packet(
+                                item["packet"],
+                                self.connection.peer_address,
+                            )
+                            item["sent_at"] = recovery_time
+                            item["retransmitted"] = True
+                        print(
+                            "SENDER: Re-sent outstanding DATA after "
+                            "handshake recovery"
+                        )
+                    if not handled_handshake and self.incoming_data_handler is not None:
+                        self.incoming_data_handler(response, address)
 
                 # Check each outstanding segment's adaptive deadline.
                 now = time.monotonic()
@@ -408,3 +451,10 @@ class SlidingWindowReceiver:
             ack,
             self.connection.peer_address,
         )
+
+    def acknowledge_retransmitted_data(self, packet, address):
+        """ACK duplicate DATA while the peer awaits a lost final ACK."""
+        if (address == self.connection.peer_address and packet.packet_type == DATA
+                and packet.sequence_number + len(packet.payload)
+                <= self.expected_sequence_number):
+            self._send_ack()
