@@ -14,18 +14,14 @@ import tempfile
 import time
 from pathlib import Path
 
-
 class FileTransferError(Exception):
     """Base class for transfer framing, completeness, and integrity errors."""
-
 
 class IncompleteTransferError(FileTransferError):
     """Raised when the transport stalls before the declared byte count arrives."""
 
-
 class IntegrityError(FileTransferError):
     """Raised when the received bytes do not match the advertised digest."""
-
 
 def _send_record(sender, record):
     encoded = json.dumps(record, separators=(",", ":")).encode("utf-8")
