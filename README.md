@@ -1,263 +1,209 @@
-# Mini-TCP
+# Mini-TCP — A Reliable Transport Protocol from Scratch
 
-A simplified reliable transport protocol implemented over UDP for studying transport-layer
-mechanisms.
+A simplified, TCP-inspired reliable transport protocol implemented over UDP in Python. Mini-TCP implements connection establishment, reliable and ordered data delivery, adaptive retransmission timeouts, congestion control, and verified binary file transfer.
 
-Mini-TCP provides packet framing, a three-way connection handshake, byte-based sequence numbers,
-cumulative ACKs, sliding-window transmission, adaptive retransmission, simplified TCP-style
-congestion control, and binary file transfer with SHA-256 verification. It is an educational
-protocol, not a full TCP implementation.
+**This is an educational implementation of selected TCP mechanisms, not a complete or standards-compliant TCP implementation.**
 
-## Features and architecture
+## Features
 
-The protocol library is under minitcp/. Applications and experiment tools are under examples/ and
-benchmarks/.
+* **Packet framing:** Custom 11-byte header with sequence numbers, acknowledgements, and payload length.
+* **Three-way handshake:** SYN → SYN-ACK → ACK, with connection-state tracking.
+* **Reliable delivery:** Stop-and-wait and sliding-window transmission with cumulative ACKs, retransmissions, and out-of-order buffering.
+* **Adaptive timeouts:** SRTT, RTTVAR, retransmission timeout (RTO), exponential backoff, and Karn's algorithm.
+* **Congestion control:** Simplified TCP Reno-style slow start, AIMD congestion avoidance, fast retransmit, and fast recovery.
+* **File integrity:** Binary file transfer with size checks and SHA-256 verification before the receiver publishes the file.
+* **Performance evaluation:** Automated tests, throughput benchmarks, congestion-window plots, and comparison with native TCP.
+* **Network impairment testing:** Optional Linux `tc netem` experiments with configured packet loss and delay.
 
-~~~~text
-Application: text or binary file framing
-                    |
-Mini-TCP: handshake, sequencing, ACKs, retransmission,
-          sliding window, RTT estimation, congestion control
-                    |
-                 UDP socket
-                    |
-             Linux network path
-             (optional tc netem)
-~~~~
+## Architecture
 
-Implemented components:
+```text
+Application (text / binary files)
+              |
+       Mini-TCP Protocol
+  +-----------+------------+
+  |           |            |
+Handshake  Reliability  Congestion
+              |         Control
+         RTT Estimation
+              |
+       Packet Framing
+              |
+          UDP Sockets
+              |
+        Network / netem
+```
 
-- Fixed packet header encoding and validation.
-- Client/server connection states and a three-message handshake.
-- Cumulative ACKs and retransmission of unacknowledged data.
-- RTT estimation, Karn's algorithm, and exponential timeout backoff.
-- Slow start, AIMD congestion avoidance, duplicate-ACK fast retransmit, and fast recovery.
-- Streaming, single-file binary transfer with receiver-side SHA-256 verification.
-- Localhost benchmarks for Mini-TCP and a kernel-TCP comparison; optional, explicitly configured
-  netem runs.
+### Technology stack
 
-## Protocol design and implementation
+Python 3 · UDP sockets · `unittest` · Linux `tc netem` · SHA-256
 
-A packet contains a one-byte type, 32-bit sequence number, 32-bit acknowledgement number, 16-bit
-payload length, and variable-length payload. Multi-byte fields use network byte order. Packet types
-are SYN, SYN_ACK, ACK, DATA, FIN, and FIN_ACK.
+## Protocol Design
 
-The handshake is:
+### Packet format
 
-~~~~text
-Client                         Server
-  SYN --------------------------->
-      <-------------------- SYN_ACK
-  ACK --------------------------->
-  ESTABLISHED                 ESTABLISHED
-~~~~
+Each packet contains an **11-byte header** followed by an optional payload.
 
-The server retransmits SYN_ACK while waiting for a valid final ACK, with bounded retries. If a
-matching SYN_ACK is retransmitted while the client is sending DATA, the client repeats its final ACK
-and performs a bounded recovery resend of outstanding DATA.
+| Field                  |         Size |
+| ---------------------- | -----------: |
+| Packet type            |       1 byte |
+| Sequence number        |      4 bytes |
+| Acknowledgement number |      4 bytes |
+| Payload length         |      2 bytes |
+| **Total header**       | **11 bytes** |
 
-Connection states and the implemented handshake transitions:
+The header uses Python's `struct` format `!BIIH`, with multi-byte fields in network byte order.
 
-~~~~mermaid
-stateDiagram-v2
-    [*] --> CLOSED
-    CLOSED --> SYN_SENT : client sends SYN
-    SYN_SENT --> ESTABLISHED : receives valid SYN_ACK; sends ACK
-    CLOSED --> SYN_RECEIVED : server receives SYN; sends SYN_ACK
-    SYN_RECEIVED --> SYN_RECEIVED : bounded SYN_ACK retransmission
-    SYN_RECEIVED --> ESTABLISHED : receives valid final ACK
-~~~~
+Supported packet types: `SYN`, `SYN_ACK`, `ACK`, `DATA`, `FIN`, `FIN_ACK`.
 
-SlidingWindowSender sends byte-sequenced DATA in a bounded window. The receiver buffers in-window
-out-of-order segments, delivers contiguous bytes, and sends cumulative ACKs. The sender retransmits
-expired segments and uses duplicate ACKs for fast retransmit. RTT samples are taken only for
-eligible, never-retransmitted data (Karn's algorithm); the retransmission timeout backs off after a
-timeout.
+### Reliable transmission
 
-Public building blocks:
+Mini-TCP develops reliability in two stages:
 
-- Packet: minitcp.packet.Packet
-- UDPTransport(host, port): bind(), send(), receive(), set_timeout(), close()
-- MiniTCPConnection(transport): connect(server_address), accept(handshake_timeout=1.0,
-  max_retries=5)
-- SlidingWindowSender(connection, window_size=4, timeout=1.0, max_retries=5, segment_size=512):
-  send(bytes)
-- SlidingWindowReceiver(connection, window_size=4, segment_size=512): receive() returns contiguous
-  bytes
-- send_file(sender, status_receiver, source_path)
-- receive_file(receiver, response_sender, destination_dir)
+1. **Stop-and-wait:** Sends one unit of data at a time and retransmits when an ACK does not arrive before the timeout.
+2. **Sliding window:** Allows multiple segments in flight, uses cumulative ACKs, buffers out-of-order data, and retransmits lost segments.
 
-The initial SYN wait in accept() and the SYN_ACK wait in connect() are bounded by the
-caller-configured socket timeout. The final-ACK wait in accept() has its own retry deadline.
+The sender's effective window is constrained by both the configured sending window and the congestion window.
 
-## Binary file transfer and SHA-256 verification
+### RTT estimation and congestion control
 
-The file-transfer format is a four-byte big-endian metadata length, UTF-8 JSON metadata (filename,
-byte size, lowercase SHA-256 digest), then exactly the declared number of file bytes. The sender
-streams file content through Mini-TCP. The receiver writes to a temporary file in the destination
-directory, verifies the size and digest, and publishes the file only after verification. It then
-sends a framed status response; the sender reports success only after receiving a positive
-verification response.
+* The RTT estimator maintains a smoothed RTT (SRTT) and RTT variation (RTTVAR) to calculate the retransmission timeout.
+* Karn's algorithm avoids using ambiguous RTT samples from retransmitted segments.
+* Exponential backoff increases the timeout after repeated failures.
+* Simplified Reno-style congestion control uses slow start, additive increase/multiplicative decrease (AIMD), fast retransmit, and fast recovery.
 
-Transfers support empty and binary files. Unsafe filenames are rejected, and the destination is
-constrained to the selected directory. The implementation transfers one file per connection.
+### File transfer and integrity
 
-## Setup and usage
+The file-transfer application sends metadata containing the filename, file size, and SHA-256 digest, followed by the file bytes. The receiver checks the received size and digest before publishing the file and returns a verification status to the sender.
 
-Requirements: Python 3 on Ubuntu. The unit tests, benchmarks, and SVG plots use the Python standard
-library. The optional impairment script also requires iproute2 (tc) and sudo for qdisc operations.
+## Project Structure
 
-From the repository root, start the receiver in one terminal:
+```text
+Mini_TCP/
+├── minitcp/
+│   ├── packet.py
+│   ├── transport.py
+│   ├── connection.py
+│   ├── state.py
+│   ├── reliability.py
+│   ├── sliding_window.py
+│   ├── rtt.py
+│   └── congestion.py
+├── examples/
+│   ├── client.py
+│   ├── server.py
+│   ├── file_sender.py
+│   └── file_receiver.py
+├── tests/
+├── benchmarks/
+└── README.md
+```
 
-~~~~bash
+## Setup and Demo
+
+**Requirements:** Python 3 and Ubuntu/Linux or WSL. The optional network-impairment experiments require `iproute2` (`tc`) and `sudo`.
+
+Run commands from the repository root.
+
+### 1. Start the file receiver
+
+In Terminal 1:
+
+```bash
+cd ~/Mini_TCP
 PYTHONPATH=. python3 examples/file_receiver.py received_files
-~~~~
+```
 
-In a second terminal, send a file:
+### 2. Send a file
 
-~~~~bash
-PYTHONPATH=. python3 examples/file_sender.py path/to/source.bin
-~~~~
+In Terminal 2:
 
-The examples use UDP port 9001 for the receiver and port 9000 for the sender, connecting over
-localhost. The receiver prints the saved path after size and SHA-256 verification; the sender prints
-the verified digest.
+```bash
+cd ~/Mini_TCP
+PYTHONPATH=. python3 examples/file_sender.py sample.bin
+```
 
-Generate a binary sample and compare the received file:
+The receiver saves the file only after successful integrity verification. The sender reports the verification result.
 
-~~~~bash
-python3 -c 'from pathlib import Path; Path("sample.bin").write_bytes(bytes(range(256)) * 4096)'
-stat -c '%n %s bytes' sample.bin received_files/sample.bin
+### 3. Verify the file independently
+
+```bash
 sha256sum sample.bin received_files/sample.bin
-~~~~
+```
 
-## Testing
+Matching SHA-256 digests indicate that the source and received files have matching contents.
 
-Run the complete automated test suite from the repository root:
+To create a sample file:
 
-~~~~bash
+```bash
+python3 -c 'from pathlib import Path; Path("sample.bin").write_bytes(bytes(range(256)) * 16)'
+```
+
+### 4. Run the automated tests
+
+```bash
 PYTHONPATH=. python3 -m unittest discover -s tests -v
-~~~~
+```
 
-Tests cover packet encoding, connection handshakes, sliding-window reliability, RTT estimation,
-congestion control, file framing and integrity, retry behavior, benchmark calculations, CSV output,
-and local transport integration. The suite includes deterministic local UDP tests for selected
-packet-loss scenarios; passing unit tests do not establish performance under every network
-impairment.
+The tests cover packet handling, connection establishment, reliability, sliding-window behaviour, RTT estimation, congestion control, file-transfer integrity, and benchmark utilities.
 
-## Benchmark methodology and results
+## Benchmarks
 
-### Mini-TCP localhost benchmark
+### Run Mini-TCP benchmarks
 
-Run five repetitions for each default payload size (4 KiB, 64 KiB, and 1 MiB):
-
-~~~~bash
+```bash
 PYTHONPATH=. python3 benchmarks/benchmark_file_transfer.py
-~~~~
+```
 
-The benchmark measures the handshake, data transfer, and receiver verification response. Throughput
-is calculated as file bytes divided by elapsed seconds and 1,024 bytes per KB. Each run generates
-fresh data, checks source and destination SHA-256, records failures, and writes individual results
-incrementally. Failed runs remain in the CSV; failed throughput is blank. Summary elapsed-time
-medians include every attempt, while throughput medians include only verified successful transfers.
+Measures file-transfer time and throughput for 4 KiB, 64 KiB, and 1 MiB payloads, with five repetitions by default. Successful transfers are checked using SHA-256.
 
-Default outputs are benchmark_results.csv, benchmark_summary.csv, and benchmark_throughput.svg.
-Existing outputs are preserved; the benchmark selects an unused numbered filename when necessary. It
-creates and removes its own temporary files and does not overwrite sample.bin or contents of
-received_files/.
+### Compare Mini-TCP with native TCP
 
-Useful options:
-
-~~~~bash
-PYTHONPATH=. python3 benchmarks/benchmark_file_transfer.py \
-  --sizes 4096,65536,1048576 \
-  --repetitions 5 \
-  --measurement-context localhost_loopback_external_conditions_unverified \
-  --csv benchmark_results.csv \
-  --summary-csv benchmark_summary.csv \
-  --plot benchmark_throughput.svg
-~~~~
-
-Verbose per-packet logs are suppressed by default. Add --log-file benchmark_debug.log to save them.
-Add --cwnd-csv congestion_events.csv --cwnd-svg congestion_window.svg to record actual
-congestion-controller events and plot the observed window. The ordinary benchmark does not inspect
-or modify network settings. Its default label indicates that external conditions are unverified; do
-not call a measurement an unimpaired baseline unless the path is known to be unimpaired.
-
-### Mini-TCP versus kernel TCP
-
-Run equivalent payload sizes over localhost:
-
-~~~~bash
+```bash
 PYTHONPATH=. python3 benchmarks/compare_kernel_tcp.py
-~~~~
+```
 
-The comparison creates fresh payloads of equal size for each transport, includes connection setup,
-data transfer, and verification, and records individual results, summaries, throughput plots, and
-Mini-TCP congestion events. Default outputs are tcp_comparison_results.csv,
-tcp_comparison_summary.csv, tcp_comparison_throughput.svg, congestion_events.csv, and
-congestion_window.svg. Existing files are preserved using unused numbered names.
+Compares file-transfer performance over localhost and generates result files and throughput plots.
 
-This is a localhost throughput comparison, not a fairness experiment. Results depend on the host,
-Python runtime, and measurement conditions; they are not universal performance guarantees. No
-controlled TCP fairness experiment is implemented.
+### Run controlled network-impairment experiments
+
+```bash
+bash benchmarks/run_netem_file_transfer.sh \
+  --loss 1 --delay 20 --reorder 0 --repetitions 5
+```
+
+This opt-in experiment requires `sudo` for Linux traffic-control operations. It affects loopback traffic while the impairment configuration is active; avoid unrelated loopback workloads during a run.
 
 ### Recorded results
 
-The following are measured medians from the specific controlled run saved at
-netem_results/netem_20261021T061054Z_8017/. That run used localhost tc-netem with 1% packet loss, 20
-ms delay, 0% reordering, and five repetitions per size. All 15 Mini-TCP transfers and all 15
-kernel-TCP transfers succeeded, and each transfer passed SHA-256 verification.
+The following medians were measured in one localhost experiment using 1% packet loss, 20 ms added delay, 0% reordering, and five repetitions per file size.
 
-| File size | Mini-TCP median throughput | Kernel TCP median throughput |
-| ---: | ---: | ---: |
-| 4,096 B | 19.56 KB/s | 48.62 KB/s |
-| 65,536 B | 74.53 KB/s | 524.61 KB/s |
-| 1,048,576 B | 81.00 KB/s | 3,551.67 KB/s |
+| File size |   Mini-TCP |    Native TCP |
+| --------: | ---------: | ------------: |
+|     4 KiB | 19.56 KB/s |    48.62 KB/s |
+|    64 KiB | 74.53 KB/s |   524.61 KB/s |
+|     1 MiB | 81.00 KB/s | 3,551.67 KB/s |
 
-These values describe that test configuration and environment only. Ordinary localhost results and
-netem-impaired results are separate measurements.
+All 15 transfers for each transport completed with successful SHA-256 verification in that experiment.
 
-## Controlled tc netem experiments
+**Interpretation:** Native TCP achieved higher throughput in the tested environment. Its mature, optimized kernel implementation outperformed this educational user-space Python implementation. These measurements are environment-specific, not universal performance guarantees.
 
-The opt-in runner installs and verifies a loopback qdisc, runs the Mini-TCP/kernel-TCP comparison,
-saves raw CSVs, plots, qdisc snapshots, and environment details under a unique directory in
-netem_results/, then removes the qdisc if its configured state is still active.
+The benchmark scripts generate CSV results and SVG plots. Exact output filenames may vary when files already exist.
 
-~~~~bash
-bash benchmarks/run_netem_file_transfer.sh \
-  --loss 1 --delay 20 --reorder 0 --repetitions 5
-~~~~
+## Limitations
 
-Options include --sizes BYTES,... and --output-root DIR; see:
-
-~~~~bash
-bash benchmarks/run_netem_file_transfer.sh --help
-~~~~
-
-The script requires sudo for tc qdisc inspection, installation, and cleanup because Linux restricts
-qdisc changes to administrators. The benchmark subprocess itself runs without root privileges. The
-script refuses to replace a non-default loopback root qdisc, verifies configured
-loss/delay/reordering, records before/active/after state, and attempts cleanup on exit or
-interruption. Netem affects loopback traffic while active; avoid unrelated loopback workloads during
-a run. The ordinary benchmarks never configure netem.
-
-## Limitations and future improvements
-
-- This is a simplified educational transport, not TCP; packet format, state handling, and
-  congestion control are limited.
-- FIN and FIN_ACK constants exist, but protocol-level graceful connection teardown is not
-  implemented.
-- Sequence numbers are 32-bit and wraparound is not handled.
-- A single connection transfers one file; there is no multiplexing or authentication.
-- Handshake startup waits rely on configured socket timeouts.
-- The TCP comparison measures localhost throughput only. Controlled TCP fairness is not implemented.
-- Experiments cover selected configurations; further repeated tests across loss, delay, and
-  reordering levels would improve evaluation confidence.
+* Not a complete or standards-compliant TCP implementation.
+* Graceful connection teardown using FIN/FIN-ACK is not implemented.
+* Sequence-number wraparound is not handled.
+* One file is transferred per connection; multiplexing and authentication are not implemented.
+* Network testing covers selected impairment configurations; broader loss, delay, and reordering experiments remain future work.
+* No controlled TCP fairness experiment has been implemented.
 
 ## Contributors
 
-B BINDU HASINI
+* **B Bindu Hasini**
+* **A Jeruba Carllin**
 
-A JERUBA CARLLIN
+## Repository
 
+[GitHub — binduhasini11/Mini_TCP](https://github.com/binduhasini11/Mini_TCP)
